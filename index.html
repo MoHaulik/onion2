@@ -1,1 +1,365 @@
-
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Onion Skin WebXR</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <style>
+    body { margin:0; overflow:hidden; font-family:Arial,sans-serif; }
+    #start { position:absolute; top:20px; left:20px; padding:12px; background:#4876FF; color:white; border:none; border-radius:4px; cursor:pointer; }
+    .exit { position:absolute; top:20px; right:20px; padding:8px 16px; background:#ff4444; color:white; border:none; border-radius:4px; cursor:pointer; display:none; }
+    .xr-active .exit { display:block; }
+    #info { position:absolute; bottom:20px; left:20px; color:white; text-shadow:0 0 4px rgba(0,0,0,0.8); }
+    #nav-zones { position:fixed; top:0; left:0; width:100%; height:100%; pointer-events:none; }
+    #nav-zones > div { position:absolute; top:0; height:100%; width:40%; pointer-events:auto; }
+    #nav-left { left:0; }
+    #nav-right { right:0; }
+    .nav-indicator { position:absolute; top:50%; transform:translateY(-50%); color:white; font-size:48px; opacity:0; transition:opacity 0.2s; pointer-events:none; }
+    #nav-left .nav-indicator { left:20px; }
+    #nav-right .nav-indicator { right:20px; }
+    #nav-zones > div:active .nav-indicator { opacity:0.6; }
+  </style>
+</head>
+<body>
+  <button id="start">Enter AR</button>
+  <button class="exit" id="exit">Exit AR</button>
+  <div id="info">Tap left/right sides to navigate • Click layers to jump</div>
+  
+  <div id="nav-zones">
+    <div id="nav-left">
+      <div class="nav-indicator">◀</div>
+    </div>
+    <div id="nav-right">
+      <div class="nav-indicator">▶</div>
+    </div>
+  </div>
+  
+  <script type="module">
+    import * as THREE from 'https://unpkg.com/three@0.150.1/build/three.module.js';
+    
+    let scene, camera, renderer, xrSession, raycaster, mouse;
+    let layers = [], currentLayer = 0, transitioning = false;
+    
+    const layerData = [
+      { title: "Welcome", content: "Interactive 3D layers\nTap sides to navigate", color: 0x4876FF },
+      { title: "Layer 1", content: "Discovery begins here\nEach layer reveals more", color: 0x48FF87 },
+      { title: "Layer 2", content: "Diving deeper\nInto the experience", color: 0xFF4887 },
+      { title: "Core", content: "The heart of the matter\nFull transparency", color: 0xFF8748 }
+    ];
+    
+    function init() {
+      scene = new THREE.Scene();
+      scene.fog = new THREE.Fog(0x000000, 1, 8);
+      
+      camera = new THREE.PerspectiveCamera(70, innerWidth/innerHeight, 0.01, 20);
+      camera.position.z = 2;
+      
+      renderer = new THREE.WebGLRenderer({antialias:true, alpha:true});
+      renderer.xr.enabled = true;
+      renderer.setSize(innerWidth, innerHeight);
+      renderer.setClearColor(0x000000, 0.9);
+      document.body.appendChild(renderer.domElement);
+      
+      raycaster = new THREE.Raycaster();
+      mouse = new THREE.Vector2();
+      
+      // Lighting
+      const ambient = new THREE.AmbientLight(0xffffff, 0.4);
+      const point = new THREE.PointLight(0xffffff, 0.8);
+      point.position.set(0, 2, 2);
+      scene.add(ambient, point);
+      
+      createLayers();
+      setupControls();
+      
+      renderer.setAnimationLoop(render);
+    }
+    
+    function createLayers() {
+      const layerGroup = new THREE.Group();
+      
+      layerData.forEach((data, i) => {
+        const layer = new THREE.Group();
+        layer.position.z = -i * 1.5;
+        layer.userData = {index: i, data: data};
+        
+        // Semi-transparent plane
+        const planeGeo = new THREE.PlaneGeometry(3, 2);
+        const planeMat = new THREE.MeshPhysicalMaterial({
+          color: data.color,
+          transparent: true,
+          opacity: 0.3,
+          roughness: 0.1,
+          metalness: 0.2,
+          side: THREE.DoubleSide
+        });
+        const plane = new THREE.Mesh(planeGeo, planeMat);
+        plane.userData.isLayer = true;
+        layer.add(plane);
+        
+        // Title box
+        const titleBox = createTextBox(data.title, 0, 0.5, 0.1);
+        layer.add(titleBox);
+        
+        // Content box
+        const contentBox = createTextBox(data.content, 0, -0.2, 0.05);
+        layer.add(contentBox);
+        
+        // 3D decoration
+        const decoration = create3DModel(data.color, i);
+        decoration.position.set(1.2, 0, 0.1);
+        layer.add(decoration);
+        
+        // Current layer indicator
+        const indicator = new THREE.Mesh(
+          new THREE.RingGeometry(0.08, 0.12, 32),
+          new THREE.MeshBasicMaterial({color: 0xffffff})
+        );
+        indicator.position.set(0, -0.8, 0.1);
+        indicator.visible = i === 0;
+        indicator.userData.isIndicator = true;
+        layer.add(indicator);
+        
+        layers.push(layer);
+        layerGroup.add(layer);
+      });
+      
+      scene.add(layerGroup);
+    }
+    
+    function createTextBox(text, x, y, z) {
+      const canvas = document.createElement('canvas');
+      const ctx = canvas.getContext('2d');
+      canvas.width = 512;
+      canvas.height = 256;
+      
+      // White background
+      ctx.fillStyle = 'white';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      
+      // Text
+      ctx.fillStyle = 'black';
+      ctx.font = '32px Arial';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      
+      const lines = text.split('\n');
+      lines.forEach((line, i) => {
+        ctx.fillText(line, 256, 128 + (i - lines.length/2 + 0.5) * 40);
+      });
+      
+      const texture = new THREE.CanvasTexture(canvas);
+      const material = new THREE.MeshBasicMaterial({map: texture, transparent: true});
+      const geometry = new THREE.PlaneGeometry(1, 0.5);
+      const mesh = new THREE.Mesh(geometry, material);
+      mesh.position.set(x, y, z);
+      
+      return mesh;
+    }
+    
+    function create3DModel(color, type) {
+      const group = new THREE.Group();
+      let geometry;
+      
+      switch(type % 4) {
+        case 0: geometry = new THREE.TetrahedronGeometry(0.2); break;
+        case 1: geometry = new THREE.OctahedronGeometry(0.2); break;
+        case 2: geometry = new THREE.IcosahedronGeometry(0.2); break;
+        case 3: geometry = new THREE.TorusGeometry(0.15, 0.05, 8, 16); break;
+      }
+      
+      const material = new THREE.MeshPhysicalMaterial({
+        color: color,
+        roughness: 0.2,
+        metalness: 0.8
+      });
+      
+      const mesh = new THREE.Mesh(geometry, material);
+      group.add(mesh);
+      
+      // Animate
+      mesh.userData.update = () => {
+        mesh.rotation.x += 0.01;
+        mesh.rotation.y += 0.02;
+      };
+      
+      return group;
+    }
+    
+    function setupControls() {
+      // Mouse/touch controls
+      renderer.domElement.addEventListener('click', onPointerClick);
+      renderer.domElement.addEventListener('mousemove', onPointerMove);
+      
+      // Tap navigation zones
+      document.getElementById('nav-left').addEventListener('click', (e) => {
+        e.stopPropagation();
+        navigateLayers(-1);
+      });
+      
+      document.getElementById('nav-right').addEventListener('click', (e) => {
+        e.stopPropagation();
+        navigateLayers(1);
+      });
+      
+      // Keyboard navigation
+      window.addEventListener('keydown', (e) => {
+        if(e.key === 'ArrowLeft') navigateLayers(-1);
+        if(e.key === 'ArrowRight') navigateLayers(1);
+      });
+      
+      // Window resize
+      window.addEventListener('resize', () => {
+        camera.aspect = innerWidth/innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(innerWidth, innerHeight);
+      });
+      
+      // XR buttons
+      document.getElementById('start').onclick = startAR;
+      document.getElementById('exit').onclick = () => xrSession?.end();
+    }
+    
+    function navigateLayers(direction) {
+      const newLayer = currentLayer + direction;
+      if(newLayer >= 0 && newLayer < layers.length) {
+        navigateToLayer(newLayer);
+      }
+    }
+    
+    function onPointerMove(e) {
+      mouse.x = (e.clientX / innerWidth) * 2 - 1;
+      mouse.y = -(e.clientY / innerHeight) * 2 + 1;
+    }
+    
+    function onPointerClick(e) {
+      if(transitioning || xrSession) return;
+      
+      // Check if clicking on navigation zones
+      const clickX = e.clientX / innerWidth;
+      if(clickX < 0.4 || clickX > 0.6) return;
+      
+      raycaster.setFromCamera(mouse, camera);
+      const intersects = raycaster.intersectObjects(scene.children, true);
+      
+      for(let hit of intersects) {
+        if(hit.object.userData.isLayer) {
+          const layer = hit.object.parent;
+          navigateToLayer(layer.userData.index);
+          break;
+        }
+      }
+    }
+    
+    function navigateToLayer(index) {
+      if(index === currentLayer || transitioning) return;
+      transitioning = true;
+      
+      // Update indicators
+      layers.forEach((layer, i) => {
+        const indicator = layer.children.find(child => child.userData.isIndicator);
+        if(indicator) indicator.visible = false;
+      });
+      
+      const targetZ = -index * 1.5 + 2;
+      const start = camera.position.z;
+      const startTime = Date.now();
+      
+      function animate() {
+        const elapsed = (Date.now() - startTime) / 1000;
+        const t = Math.min(elapsed / 0.8, 1);
+        const eased = t < 0.5 ? 2*t*t : -1+(4-2*t)*t;
+        
+        camera.position.z = start + (targetZ - start) * eased;
+        
+        if(t < 1) {
+          requestAnimationFrame(animate);
+        } else {
+          currentLayer = index;
+          transitioning = false;
+          
+          // Show current layer indicator
+          const indicator = layers[index].children.find(child => child.userData.isIndicator);
+          if(indicator) indicator.visible = true;
+        }
+      }
+      animate();
+    }
+    
+    function startAR() {
+      navigator.xr?.isSessionSupported('immersive-ar').then(supported => {
+        if(!supported) return alert('AR not supported');
+        navigator.xr.requestSession('immersive-ar', {
+          requiredFeatures: ['hit-test']
+        }).then(onSession);
+      });
+    }
+    
+    function onSession(session) {
+      xrSession = session;
+      document.body.classList.add('xr-active');
+      document.getElementById('nav-zones').style.display = 'none';
+      renderer.xr.setReferenceSpaceType('local');
+      renderer.xr.setSession(session);
+      
+      // Setup AR controller
+      const controller = renderer.xr.getController(0);
+      controller.addEventListener('select', onSelect);
+      scene.add(controller);
+      
+      session.addEventListener('end', () => {
+        document.body.classList.remove('xr-active');
+        document.getElementById('nav-zones').style.display = 'block';
+        xrSession = null;
+      });
+    }
+    
+    function onSelect(e) {
+      const controller = e.target;
+      const tempMatrix = new THREE.Matrix4();
+      tempMatrix.identity().extractRotation(controller.matrixWorld);
+      
+      raycaster.ray.origin.setFromMatrixPosition(controller.matrixWorld);
+      raycaster.ray.direction.set(0, 0, -1).applyMatrix4(tempMatrix);
+      
+      const intersects = raycaster.intersectObjects(scene.children, true);
+      for(let hit of intersects) {
+        if(hit.object.userData.isLayer) {
+          const layer = hit.object.parent;
+          navigateToLayer(layer.userData.index);
+          break;
+        }
+      }
+    }
+    
+    function render() {
+      // Update animations
+      scene.traverse(obj => {
+        if(obj.userData.update) obj.userData.update();
+      });
+      
+      // Hover effect
+      if(!xrSession) {
+        raycaster.setFromCamera(mouse, camera);
+        const intersects = raycaster.intersectObjects(scene.children, true);
+        
+        layers.forEach(layer => {
+          const plane = layer.children[0];
+          plane.material.opacity = 0.3;
+        });
+        
+        for(let hit of intersects) {
+          if(hit.object.userData.isLayer) {
+            hit.object.material.opacity = 0.5;
+            break;
+          }
+        }
+      }
+      
+      renderer.render(scene, camera);
+    }
+    
+    init();
+  </script>
+</body>
+</html>
